@@ -51,7 +51,7 @@ func TestClient(t *T) {
 
 	status, err := c.Status(q)
 	require.Nil(err)
-	assert.Equal(status[0], fmt.Sprintf("%s total: 3 processing: 0", q))
+	assert.Equal(status[0], fmt.Sprintf("%s total: 3 processing: 0 consumers: 0", q))
 }
 
 func TestConsumer(t *T) {
@@ -87,5 +87,5 @@ func TestConsumer(t *T) {
 
 	status, err := c2.Status(q)
 	require.Nil(err)
-	assert.Equal(status[0], fmt.Sprintf("%s total: 0 processing: 0", q))
+	assert.Equal(status[0], fmt.Sprintf("%s total: 0 processing: 0 consumers: 0", q))
 }

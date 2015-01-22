@@ -107,6 +107,7 @@ type Client struct {
 func New(addr ...string) *Client {
 	c := Client{
 		clients: map[string]*redis.Client{},
+		Timeout: TIMEOUT,
 	}
 
 	for i := range addr {
