@@ -56,6 +56,15 @@ import (
 	"github.com/fzzy/radix/redis"
 )
 
+var uuidCh = make(chan string, 1024)
+func init() {
+	go func() {
+		for {
+			uuidCh <- uuid.New()
+		}
+	}()
+}
+
 // Timeout to use when reading from socket
 const TIMEOUT = 30 * time.Second
 
@@ -171,7 +180,7 @@ func (c *Client) PushEvent(queue string, event *Event) error {
 // Pushes an event with the given contents onto the end of the queue. The
 // event's Id will be an automatically generated uuid
 func (c *Client) Push(queue, contents string) error {
-	event := Event{Id: uuid.New(), Contents: contents}
+	event := Event{Id: <-uuidCh, Contents: contents}
 	return c.PushEvent(queue, &event)
 }
 
@@ -184,7 +193,7 @@ func (c *Client) PushEventHigh(queue string, event *Event) error {
 // Pushes an event with the given contents onto the end of the queue. The
 // event's Id will be an automatically generated uuid
 func (c *Client) PushHigh(queue, contents string) error {
-	event := Event{Id: uuid.New(), Contents: contents}
+	event := Event{Id: <-uuidCh, Contents: contents}
 	return c.PushEventHigh(queue, &event)
 }
 
