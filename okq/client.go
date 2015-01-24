@@ -225,9 +225,9 @@ type ack struct {
 // have Ack() called on it (unless ConsumerUnsafe is used)
 type ConsumerEvent struct {
 	*Event
-	Queue  string
-	ackCh  chan *ack
-	stopCh chan bool
+	Queue     string
+	ackCh     chan *ack
+	ackStopCh chan bool
 }
 
 // Acknowledges that the given ConsumerEvent has been successfully consumed. If
@@ -236,22 +236,31 @@ type ConsumerEvent struct {
 func (we *ConsumerEvent) Ack() {
 	select {
 	case we.ackCh <- &ack{we.Event.Id, we.Queue}:
-	case <-we.stopCh:
+	case <-we.ackStopCh:
 	}
 }
 
 // Turns this client into a consumer. It will register itself on the given
-// queues, and push all incoming events to the given ConsumerEvent channel. If
-// stopCh is not nil it can be closed in order to stop the consumer. ch will be
-// closed when stopCh is closed. Note that some events may not be successfully
-// ack'd if stopCh is closed before they have Ack() called on them.
+// queues, and push all incoming events to the given ConsumerEvent channel (ch).
+// If stopCh is not nil it can be closed in order to stop the consumer.
 //
-// This call will block until the first connection error, which will be
-// returned. The method may be called again after this, but you may keep getting
-// back connection errors if none of the endpoints are reachable.
+// This call:
 //
-// Since this call blocks indefinitely it's necessary to be reading off of ch in
-// a separate goroutine from the one calling this method.
+// * blocks until stopCh is closed or there is a connection error
+//
+// * assumes ch is already being read from in a separate go-routine
+//
+// * assumes ch is read from until it's closed
+//
+// * always closes ch just before it returns (as a consequence, don't share the
+// same ch amongst multiple calls)
+//
+// * upon the closing of stopCh will wait for any straggling Ack calls before
+// closing ch and returning (although there is a 30 second timeout)
+//
+// * returns the connection error which caused it to close, or nil if the close
+// was due to stopCh
+//
 func (c *Client) Consumer(
 	ch chan *ConsumerEvent, stopCh chan bool, queue ...string,
 ) error {
@@ -280,20 +289,20 @@ func (c *Client) consumer(
 		return err
 	}
 
-	// If the stopCh is EVER closed we want to make sure the  ch gets
-	// closed also. If we're returning and stopCh isn't closed it means
-	// there was some kind of connection error, and we should close the client.
-	// It's possible that stopCh was closed AND there was a connection error, in
-	// that case the faulty connection will stay in c.clients, but it will be
-	// ferreted out the next time it tries to get used
+	// If the stopCh is EVER closed we want to make sure the ch gets closed
+	// also. If we're returning and stopCh isn't closed it means there was some
+	// kind of connection error, and we should close the client.  It's possible
+	// that stopCh was closed AND there was a connection error, in that case the
+	// faulty connection will stay in c.clients, but it will be ferreted out the
+	// next time it tries to get used
 	defer func() {
 		select {
 		case <-stopCh:
-			close(ch)
 		default:
 			rclient.Close()
 			c.clients[addr] = nil
 		}
+		close(ch)
 	}()
 
 	if err := rclient.Cmd("QREGISTER", queues).Err; err != nil {
@@ -301,10 +310,28 @@ func (c *Client) consumer(
 	}
 
 	notifyTimeout := (c.Timeout - (1 * time.Second)).Seconds()
+
+	// The ackHandler stuff is a bit complex. See the ackHandler method for
+	// descriptions of what each of these channels is for
 	ackCh := make(chan *ack)
+	ackStopCh := make(chan bool) // Only for clients calling Ack()
+	ackTrackCh := make(chan bool)
 	ackErrCh := make(chan error)
-	go ackHandler(addr, c.Timeout, ackCh, ackErrCh)
-	defer close(ackCh)
+
+	if !noack {
+		go ackHandler(addr, c.Timeout, ackCh, ackStopCh, ackTrackCh, ackErrCh)
+		// Remember that defers are executed in reverse order upon returning
+		defer func() {
+			// Close this to let the ackHandler know that there's no more new
+			// events coming in
+			close(ackTrackCh)
+			// Once ackErrCh is closed we know that ackHandler is returned
+			<-ackErrCh
+			// Close the ackCh just in case
+			close(ackCh)
+		}()
+	}
+
 	for {
 		r := rclient.Cmd("QNOTIFY", notifyTimeout)
 		if err := r.Err; err != nil {
@@ -343,19 +370,38 @@ func (c *Client) consumer(
 			continue
 		}
 
+		// Let the ackHandler know to expect an ack for this event
+		if !noack {
+			select {
+			case ackTrackCh <- true:
+			case err := <-ackErrCh:
+				return err
+			}
+		}
+
 		select {
-		case ch <- &ConsumerEvent{e, q, ackCh, stopCh}:
+		case ch <- &ConsumerEvent{e, q, ackCh, ackStopCh}:
 		case err := <-ackErrCh:
 			return err
-		case <-stopCh:
-			return nil
 		}
 	}
 }
 
+// ackCh      - Main channel that incoming ack messages from clients come from
+// ackStopCh  - Channel which is closed when this method returns, clients use it
+// 				to know that nothing is there to receive their acks
+// ackTrackCh - Used to let the ackHandler know that an event has been sent out
+// 				and to expect an ack for it. When closed it means that no more
+// 				new events will be sent out
+// ackErrCh   - Channel used to send connection errors from this connection back
+// 				to the main channel. This is always closed when this method
+//				returns
 func ackHandler(
-	addr string, timeout time.Duration, ackCh chan *ack, ackErrCh chan error,
+	addr string, timeout time.Duration, ackCh chan *ack,
+	ackStopCh, ackTrackCh chan bool, ackErrCh chan error,
 ) {
+	defer close(ackErrCh)
+	defer close(ackStopCh)
 	rclient, err := redis.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		ackErrCh <- err
@@ -363,10 +409,46 @@ func ackHandler(
 	}
 	defer rclient.Close()
 
-	for a := range ackCh {
-		if err := rclient.Cmd("QACK", a.queue, a.id).Err; err != nil {
-			ackErrCh <- err
+	var track int64
+ackloop:
+	for {
+		select {
+		case a, ok := <-ackCh:
+			if !ok {
+				return
+			}
+			if err := doAck(rclient, a); err != nil {
+				ackErrCh <- err
+				return
+			}
+			track--
+
+		case _, ok := <-ackTrackCh:
+			if !ok {
+				break ackloop
+			}
+			track++
+		}
+	}
+
+	// If we're here there have been no errors and ackCh is still open, but
+	// ackTrackCh is closed meaning that there are no new events being sent out
+	// and we have only to wait for acks from any stragglers. After 30 seconds
+	// okq has reclaimed the events anyway, so no point in waiting after that
+	for ;track > 0; track-- {
+		select {
+		case a := <-ackCh:
+			if err := doAck(rclient, a); err != nil {
+				// We don't bother writing to ackErrCh, only ackTrackCh matters
+				// at this point, any errors from here won't bubble up anyway
+				return
+			}
+		case <-time.After(30 * time.Second):
 			return
 		}
 	}
+}
+
+func doAck(rclient *redis.Client, a *ack) error {
+	return rclient.Cmd("QACK", a.queue, a.id).Err
 }
