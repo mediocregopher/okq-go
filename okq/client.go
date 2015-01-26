@@ -50,10 +50,12 @@ package okq
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"code.google.com/p/go-uuid/uuid"
 	"github.com/fzzy/radix/redis"
+	"github.com/grooveshark/golib/agg"
 )
 
 var uuidCh = make(chan string, 1024)
@@ -70,6 +72,10 @@ const TIMEOUT = 30 * time.Second
 
 // Notify timeout used in the consumer
 const notify_timeout = TIMEOUT - (1 * time.Second)
+
+// If true turns on debug logging and agg support (see
+// https://github.com/grooveshark/golib)
+var Debug bool
 
 // A single event which can be read from or written to an okq instance
 type Event struct {
@@ -142,6 +148,7 @@ func (c *Client) cmd(cmd string, args ...interface{}) *redis.Reply {
 			return &redis.Reply{Type: redis.ErrorReply, Err: err}
 		}
 
+		start := time.Now()
 		r := rclient.Cmd(cmd, args...)
 		if err := r.Err; err != nil {
 			if _, ok := err.(*redis.CmdError); !ok {
@@ -149,6 +156,9 @@ func (c *Client) cmd(cmd string, args ...interface{}) *redis.Reply {
 				c.clients[addr] = nil
 				continue
 			}
+		}
+		if Debug {
+			agg.Agg(strings.ToUpper(cmd), time.Since(start).Seconds())
 		}
 
 		return r
@@ -276,6 +286,15 @@ func (c *Client) ConsumerUnsafe(
 	return c.consumer(ch, stopCh, queue, true)
 }
 
+func timedCmd(rclient *redis.Client, cmd string, args ...interface{}) *redis.Reply {
+	start := time.Now()
+	r := rclient.Cmd(cmd, args...)
+	if Debug {
+		agg.Agg(strings.ToUpper(cmd), time.Since(start).Seconds())
+	}
+	return r
+}
+
 func (c *Client) consumer(
 	ch chan *ConsumerEvent, stopCh chan bool, queues []string, noack bool,
 ) error {
@@ -305,7 +324,7 @@ func (c *Client) consumer(
 		close(ch)
 	}()
 
-	if err := rclient.Cmd("QREGISTER", queues).Err; err != nil {
+	if err := timedCmd(rclient, "QREGISTER", queues).Err; err != nil {
 		return err
 	}
 
@@ -333,7 +352,7 @@ func (c *Client) consumer(
 	}
 
 	for {
-		r := rclient.Cmd("QNOTIFY", notifyTimeout)
+		r := timedCmd(rclient, "QNOTIFY", notifyTimeout)
 		if err := r.Err; err != nil {
 			return err
 		}
@@ -363,7 +382,7 @@ func (c *Client) consumer(
 			args = append(args, "NOACK")
 		}
 
-		e, err := replyToEvent(rclient.Cmd("QRPOP", args))
+		e, err := replyToEvent(timedCmd(rclient, "QRPOP", args))
 		if err != nil {
 			return err
 		} else if e == nil {
@@ -450,5 +469,5 @@ ackloop:
 }
 
 func doAck(rclient *redis.Client, a *ack) error {
-	return rclient.Cmd("QACK", a.queue, a.id).Err
+	return timedCmd(rclient, "QACK", a.queue, a.id).Err
 }
