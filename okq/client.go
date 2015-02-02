@@ -54,11 +54,12 @@ import (
 	"time"
 
 	"code.google.com/p/go-uuid/uuid"
-	"github.com/fzzy/radix/redis"
 	"github.com/grooveshark/golib/agg"
+	"github.com/mediocregopher/radix.v2/redis"
 )
 
 var uuidCh = make(chan string, 1024)
+
 func init() {
 	go func() {
 		for {
@@ -83,8 +84,8 @@ type Event struct {
 	Contents string // Arbitrary contents of the event
 }
 
-func replyToEvent(r *redis.Reply) (*Event, error) {
-	if r.Type == redis.NilReply {
+func replyToEvent(r *redis.Resp) (*Event, error) {
+	if r.IsType(redis.Nil) {
 		return nil, nil
 	}
 	parts, err := r.List()
@@ -141,17 +142,17 @@ func (c *Client) getConn() (string, *redis.Client, error) {
 	return "", nil, errors.New("no connectable endpoints")
 }
 
-func (c *Client) cmd(cmd string, args ...interface{}) *redis.Reply {
+func (c *Client) cmd(cmd string, args ...interface{}) *redis.Resp {
 	for i := 0; i < 3; i++ {
 		addr, rclient, err := c.getConn()
 		if err != nil {
-			return &redis.Reply{Type: redis.ErrorReply, Err: err}
+			return redis.NewResp(err)
 		}
 
 		start := time.Now()
 		r := rclient.Cmd(cmd, args...)
 		if err := r.Err; err != nil {
-			if _, ok := err.(*redis.CmdError); !ok {
+			if r.IsType(redis.IOErr) {
 				rclient.Close()
 				c.clients[addr] = nil
 				continue
@@ -164,10 +165,7 @@ func (c *Client) cmd(cmd string, args ...interface{}) *redis.Reply {
 		return r
 	}
 
-	return &redis.Reply{
-		Type: redis.ErrorReply,
-		Err:  errors.New("could not find usable endpoint"),
-	}
+	return redis.NewResp(errors.New("could not find usable endpoint"))
 }
 
 // Returns the next event which will be retrieved from the queue, without
@@ -286,7 +284,9 @@ func (c *Client) ConsumerUnsafe(
 	return c.consumer(ch, stopCh, queue, true)
 }
 
-func timedCmd(rclient *redis.Client, cmd string, args ...interface{}) *redis.Reply {
+func timedCmd(
+	rclient *redis.Client, cmd string, args ...interface{},
+) *redis.Resp {
 	start := time.Now()
 	r := rclient.Cmd(cmd, args...)
 	if Debug {
@@ -368,7 +368,7 @@ func (c *Client) consumer(
 		default:
 		}
 
-		if r.Type == redis.NilReply {
+		if r.IsType(redis.Nil) {
 			continue
 		}
 
@@ -454,7 +454,7 @@ ackloop:
 	// ackTrackCh is closed meaning that there are no new events being sent out
 	// and we have only to wait for acks from any stragglers. After 30 seconds
 	// okq has reclaimed the events anyway, so no point in waiting after that
-	for ;track > 0; track-- {
+	for ; track > 0; track-- {
 		select {
 		case a := <-ackCh:
 			if err := doAck(rclient, a); err != nil {
