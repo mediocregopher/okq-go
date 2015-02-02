@@ -1,6 +1,6 @@
-// Go client package for the okq persitent queue
+// Package okq is a go client for the okq persitent queue
 //
-// TO import inside your package do:
+// To import inside your package do:
 //
 //	import "github.com/mediocregopher/okq-go/okq"
 //
@@ -72,15 +72,15 @@ func init() {
 const TIMEOUT = 30 * time.Second
 
 // Notify timeout used in the consumer
-const notify_timeout = TIMEOUT - (1 * time.Second)
+const notifyTimeout = TIMEOUT - (1 * time.Second)
 
 // If true turns on debug logging and agg support (see
 // https://github.com/grooveshark/golib)
 var Debug bool
 
-// A single event which can be read from or written to an okq instance
+// Event is a single event which can be read from or written to an okq instance
 type Event struct {
-	Id       string // Unique id of this event
+	ID       string // Unique id of this event
 	Contents string // Arbitrary contents of the event
 }
 
@@ -95,11 +95,13 @@ func replyToEvent(r *redis.Resp) (*Event, error) {
 		return nil, errors.New("not enough elements in reply")
 	}
 	return &Event{
-		Id:       parts[0],
+		ID:       parts[0],
 		Contents: parts[1],
 	}, nil
 }
 
+// Client is a client for the okq persistant queue. It can talk to a pool of okq
+// instances and failover from one to the other if one loses connectivity
 type Client struct {
 	clients map[string]*redis.Client
 
@@ -108,9 +110,9 @@ type Client struct {
 	Timeout time.Duration
 }
 
-// Given one or more okq endpoints (all in the same pool), returns a client
-// which will interact with them. Returns an error if it can't connect to any of
-// the given clients
+// New takes one or more okq endpoints (all in the same pool) and returns a
+// client which will interact with them. Returns an error if it can't connect to
+// any of the given clients
 func New(addr ...string) *Client {
 	c := Client{
 		clients: map[string]*redis.Client{},
@@ -168,51 +170,53 @@ func (c *Client) cmd(cmd string, args ...interface{}) *redis.Resp {
 	return redis.NewResp(errors.New("could not find usable endpoint"))
 }
 
-// Returns the next event which will be retrieved from the queue, without
-// actually removing it from the queue. Returns nil if the queue is empty
+// PeekNext returns the next event which will be retrieved from the queue,
+// without actually removing it from the queue. Returns nil if the queue is
+// empty
 func (c *Client) PeekNext(queue string) (*Event, error) {
 	return replyToEvent(c.cmd("QRPEEK", queue))
 }
 
-// Returns the event most recently added to the queue, without actually removing
-// it from the queue. Returns nil if the queue is empty
+// PeekLast returns the event most recently added to the queue, without actually
+// removing it from the queue. Returns nil if the queue is empty
 func (c *Client) PeekLast(queue string) (*Event, error) {
 	return replyToEvent(c.cmd("QLPEEK", queue))
 }
 
-// Pushes the given event onto the end of the queue. The event's Id must be
-// unique within that queue
+// PushEvent pushes the given event onto the end of the queue. The event's Id
+// must be unique within that queue
 func (c *Client) PushEvent(queue string, event *Event) error {
-	return c.cmd("QLPUSH", queue, event.Id, event.Contents).Err
+	return c.cmd("QLPUSH", queue, event.ID, event.Contents).Err
 }
 
-// Pushes an event with the given contents onto the end of the queue. The
+// Push pushes an event with the given contents onto the end of the queue. The
 // event's Id will be an automatically generated uuid
 func (c *Client) Push(queue, contents string) error {
-	event := Event{Id: <-uuidCh, Contents: contents}
+	event := Event{ID: <-uuidCh, Contents: contents}
 	return c.PushEvent(queue, &event)
 }
 
-// Pushes the given event onto the front of the queue (meaning it will be the
-// next event consumed). The event's Id must be unique within that queue
+// PushEventHigh pushes the given event onto the front of the queue (meaning it
+// will be the next event consumed). The event's Id must be unique within that
+// queue
 func (c *Client) PushEventHigh(queue string, event *Event) error {
-	return c.cmd("QRPUSH", queue, event.Id, event.Contents).Err
+	return c.cmd("QRPUSH", queue, event.ID, event.Contents).Err
 }
 
-// Pushes an event with the given contents onto the end of the queue. The
-// event's Id will be an automatically generated uuid
+// PushHigh pushes an event with the given contents onto the end of the queue.
+// The event's Id will be an automatically generated uuid
 func (c *Client) PushHigh(queue, contents string) error {
-	event := Event{Id: <-uuidCh, Contents: contents}
+	event := Event{ID: <-uuidCh, Contents: contents}
 	return c.PushEventHigh(queue, &event)
 }
 
-// Returns the statuses of the given queues, or the statuses of all the known
-// queues if no queues are given
+// Status returns the statuses of the given queues, or the statuses of all the
+// known queues if no queues are given
 func (c *Client) Status(queue ...string) ([]string, error) {
 	return c.cmd("QSTATUS", queue).List()
 }
 
-// Closes all connections that this client currently has open
+// Close closes all connections that this client currently has open
 func (c *Client) Close() error {
 	var err error
 	for addr, rclient := range c.clients {
@@ -229,8 +233,8 @@ type ack struct {
 	id, queue string
 }
 
-// An event as returned by a consumer client. It contains an Event, but it must
-// have Ack() called on it (unless ConsumerUnsafe is used)
+// ConsumerEvent is an event as returned by a consumer client. It contains an
+// Event, but it must have Ack() called on it (unless ConsumerUnsafe is used)
 type ConsumerEvent struct {
 	*Event
 	Queue     string
@@ -238,19 +242,19 @@ type ConsumerEvent struct {
 	ackStopCh chan bool
 }
 
-// Acknowledges that the given ConsumerEvent has been successfully consumed. If
-// this is not called by the event's timeout the event will be put back in its
-// queue to be consumed again
+// Ack acknowledges that the given ConsumerEvent has been successfully consumed.
+// If this is not called by the event's timeout the event will be put back in
+// its queue to be consumed again
 func (we *ConsumerEvent) Ack() {
 	select {
-	case we.ackCh <- &ack{we.Event.Id, we.Queue}:
+	case we.ackCh <- &ack{we.Event.ID, we.Queue}:
 	case <-we.ackStopCh:
 	}
 }
 
-// Turns this client into a consumer. It will register itself on the given
-// queues, and push all incoming events to the given ConsumerEvent channel (ch).
-// If stopCh is not nil it can be closed in order to stop the consumer.
+// Consumer turns this client into a consumer. It will register itself on the
+// given queues, and push all incoming events to the given ConsumerEvent channel
+// (ch). If stopCh is not nil it can be closed in order to stop the consumer.
 //
 // This call:
 //
@@ -275,9 +279,9 @@ func (c *Client) Consumer(
 	return c.consumer(ch, stopCh, queue, false)
 }
 
-// Same as Consumer, but it's not necessary to call Ack on events received from
-// ch. This is more unsafe as if the consumer dies while processing the event
-// the event is lost forever
+// ConsumerUnsafe is the same as Consumer, but it's not necessary to call Ack on
+// events received from ch. This is more unsafe as if the consumer dies while
+// processing the event the event is lost forever
 func (c *Client) ConsumerUnsafe(
 	ch chan *ConsumerEvent, stopCh chan bool, queue ...string,
 ) error {
