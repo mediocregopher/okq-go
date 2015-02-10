@@ -61,31 +61,33 @@ func TestConsumer(t *T) {
 	assert := assert.New(t)
 	require := require.New(t)
 
-	ch := make(chan *ConsumerEvent)
 	stopCh := make(chan bool)
+	workCh := make(chan bool)
 
-	numEvents := 1000
-	go func() {
-		for i := 0; i < numEvents; i++ {
-			require.Nil(c2.Push(q, strconv.Itoa(i)))
-		}
-	}()
+	i := 0
+	fn := func(eq string, e *Event) bool {
+		assert.Equal(q, eq)
+		assert.Equal(strconv.Itoa(i), e.Contents)
+		i++
+		workCh <- true
+		return true
+	}
 
 	retCh := make(chan error)
 	go func() {
-		retCh <- c1.Consumer(ch, stopCh, q)
+		retCh <- c1.Consumer(fn, stopCh, q)
 	}()
 
-	for i := 0; i < numEvents; i++ {
-		we := <-ch
-		assert.Equal(strconv.Itoa(i), we.Event.Contents)
-		we.Ack()
+	for i := 0; i < 1000; i++ {
+		require.Nil(c2.Push(q, strconv.Itoa(i)))
+		<-workCh
 	}
+
 	close(stopCh)
 	require.Nil(<-retCh)
 	require.Nil(c1.Close())
 
 	status, err := c2.Status(q)
 	require.Nil(err)
-	assert.Equal(status[0], fmt.Sprintf("%s total: 0 processing: 0 consumers: 0", q))
+	assert.Equal(fmt.Sprintf("%s total: 0 processing: 0 consumers: 0", q), status[0])
 }
