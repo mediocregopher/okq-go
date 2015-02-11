@@ -18,12 +18,13 @@
 // All events in okq require a unique event id. This package will automatically
 // generate a unique id if you use the standard Push methods.
 //
-//	cl.Push("super-queue", "my awesome event")
+//	cl.Push("super-queue", "my awesome event", okq.Normal)
 //
 // You can also create your own id by using the PushEvent methods. Remember
 // though that the event id *must* be unique within that queue.
 //
-//	cl.PushEvent("super-queue", &okq.Event{"unique id", "my awesome event"})
+//	e := okq.Event{"super-queue", "unique id", "my awesome event"}
+//	cl.PushEvent(&e, okq.Normal)
 //
 // Consuming from queues
 //
@@ -32,8 +33,8 @@
 // return upon an error or a manual stop.
 //
 // Example of a consumer which should never quit
-//	fn := func(q string, e *Event) bool {
-//		log.Printf("event received: %s", e.Contents)
+//	fn := func(e *okq.Event) bool {
+//		log.Printf("event received on %s: %s", e.Queue, e.Contents)
 //		return true
 //	}
 //	for {
@@ -64,6 +65,25 @@ func init() {
 	}()
 }
 
+// PushFlag is passed into either of the Push commands to alter their behavior.
+// You can or multiple of these together to combine their behavior
+type PushFlag int
+
+const (
+	// Normal is the expected behavior (call waits for event to be committed to
+	// okq, normal priority)
+	Normal PushFlag = 1 << iota
+
+	// HighPriority causes the pushed event to be placed at the front of the
+	// queue instead of the back
+	HighPriority
+
+	// NoBlock causes set the server to not wait for the event to be committed
+	// to disk before replying, it will reply as soon as it can and commit
+	// asynchronously
+	NoBlock
+)
+
 // DefaultTimeout is used when reading from socket
 const DefaultTimeout = 30 * time.Second
 
@@ -76,11 +96,12 @@ var Debug bool
 
 // Event is a single event which can be read from or written to an okq instance
 type Event struct {
+	Queue    string // The queue the event is coming from/going to
 	ID       string // Unique id of this event
 	Contents string // Arbitrary contents of the event
 }
 
-func replyToEvent(r *redis.Resp) (*Event, error) {
+func replyToEvent(q string, r *redis.Resp) (*Event, error) {
 	if r.IsType(redis.Nil) {
 		return nil, nil
 	}
@@ -91,6 +112,7 @@ func replyToEvent(r *redis.Resp) (*Event, error) {
 		return nil, errors.New("not enough elements in reply")
 	}
 	return &Event{
+		Queue:    q,
 		ID:       parts[0],
 		Contents: parts[1],
 	}, nil
@@ -177,40 +199,48 @@ func (c *Client) cmd(cmd string, args ...interface{}) *redis.Resp {
 // without actually removing it from the queue. Returns nil if the queue is
 // empty
 func (c *Client) PeekNext(queue string) (*Event, error) {
-	return replyToEvent(c.cmd("QRPEEK", queue))
+	return replyToEvent(queue, c.cmd("QRPEEK", queue))
 }
 
 // PeekLast returns the event most recently added to the queue, without actually
 // removing it from the queue. Returns nil if the queue is empty
 func (c *Client) PeekLast(queue string) (*Event, error) {
-	return replyToEvent(c.cmd("QLPEEK", queue))
+	return replyToEvent(queue, c.cmd("QLPEEK", queue))
 }
 
-// PushEvent pushes the given event onto the end of the queue. The event's Id
-// must be unique within that queue
-func (c *Client) PushEvent(queue string, event *Event) error {
-	return c.cmd("QLPUSH", queue, event.ID, event.Contents).Err
+// PushEvent pushes the given event onto its queue. The event's Id must be
+// unique within that queue
+func (c *Client) PushEvent(e *Event, f PushFlag) error {
+	cmd := "QLPUSH"
+	if f&HighPriority > 0 {
+		cmd = "QRPUSH"
+	}
+	args := append(make([]interface{}, 0, 4), e.Queue, e.ID, e.Contents)
+	if f&NoBlock > 0 {
+		args = append(args, "NOBLOCK")
+	}
+
+	return c.cmd(cmd, args...).Err
 }
 
-// Push pushes an event with the given contents onto the end of the queue. The
-// event's Id will be an automatically generated uuid
-func (c *Client) Push(queue, contents string) error {
-	event := Event{ID: <-uuidCh, Contents: contents}
-	return c.PushEvent(queue, &event)
-}
-
-// PushEventHigh pushes the given event onto the front of the queue (meaning it
-// will be the next event consumed). The event's Id must be unique within that
-// queue
-func (c *Client) PushEventHigh(queue string, event *Event) error {
-	return c.cmd("QRPUSH", queue, event.ID, event.Contents).Err
-}
-
-// PushHigh pushes an event with the given contents onto the end of the queue.
-// The event's Id will be an automatically generated uuid
-func (c *Client) PushHigh(queue, contents string) error {
-	event := Event{ID: <-uuidCh, Contents: contents}
-	return c.PushEventHigh(queue, &event)
+// Push pushes an event with the given contents onto the queue. The event's ID
+// will be an automatically generated uuid
+//
+// Normal event:
+//
+//	cl.Push("queue", "some event", okq.Normal)
+//
+// High priority event:
+//
+//	cl.Push("queue", "some important event", okq.HighPriority)
+//
+// Submit an event as fast as possible
+//
+//	cl.Push("queue", "not that important event", okq.NoBlock)
+//
+func (c *Client) Push(queue, contents string, f PushFlag) error {
+	event := Event{Queue: queue, ID: <-uuidCh, Contents: contents}
+	return c.PushEvent(&event, f)
 }
 
 // Status returns the statuses of the given queues, or the statuses of all the
@@ -233,11 +263,9 @@ func (c *Client) Close() error {
 }
 
 // ConsumerFunc is passed into Consume, and is used as a callback for incoming
-// Events. On every new event this will accept the queue the event has come in
-// on and the event itself. It should return true if the event was processed
-// successfully and false otherwise. If ConsumerUnsafe is being used the return
-// is ignored
-type ConsumerFunc func(string, *Event) bool
+// Events. It should return true if the event was processed successfully and
+// false otherwise. If ConsumerUnsafe is being used the return is ignored
+type ConsumerFunc func(*Event) bool
 
 // Consumer turns a client into a consumer. It will register itself on the given
 // queues, and call the ConsumerFunc on all events it comes across. If stopCh is
@@ -317,7 +345,7 @@ func (c *Client) consumer(
 			args = append(args, "NOACK")
 		}
 
-		e, err := replyToEvent(doCmd(rclient, "QRPOP", args))
+		e, err := replyToEvent(q, doCmd(rclient, "QRPOP", args))
 		if err != nil {
 			return err
 		} else if e == nil {
@@ -325,11 +353,11 @@ func (c *Client) consumer(
 		}
 
 		if noack {
-			go fn(q, e)
+			go fn(e)
 			continue
 		}
 
-		if fn(q, e) {
+		if fn(e) {
 			doCmd(rclient, "QACK", q, e.ID)
 		}
 	}

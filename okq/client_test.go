@@ -36,9 +36,9 @@ func TestClient(t *T) {
 	assert.Nil(e)
 
 	// Add some items to the queue
-	require.Nil(c.Push(q, "foo"))
-	require.Nil(c.Push(q, "bar"))
-	require.Nil(c.PushHigh(q, "baz"))
+	require.Nil(c.Push(q, "foo", Normal))
+	require.Nil(c.Push(q, "bar", Normal))
+	require.Nil(c.Push(q, "baz", HighPriority))
 
 	// The queue should now be (from first to last) "baz", "foo", "bar"
 	e, err = c.PeekNext(q)
@@ -65,8 +65,8 @@ func TestConsumer(t *T) {
 	workCh := make(chan bool)
 
 	i := 0
-	fn := func(eq string, e *Event) bool {
-		assert.Equal(q, eq)
+	fn := func(e *Event) bool {
+		assert.Equal(q, e.Queue)
 		assert.Equal(strconv.Itoa(i), e.Contents)
 		i++
 		workCh <- true
@@ -79,7 +79,7 @@ func TestConsumer(t *T) {
 	}()
 
 	for i := 0; i < 1000; i++ {
-		require.Nil(c2.Push(q, strconv.Itoa(i)))
+		require.Nil(c2.Push(q, strconv.Itoa(i), Normal))
 		<-workCh
 	}
 
