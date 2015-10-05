@@ -387,6 +387,10 @@ func (c *Client) consumer(
 
 		args := []string{q}
 		if noack {
+			// okq uses EX 0 to indicate that no qack is needed now, but it used
+			// to use NOACK. We send both for now for backwards compatibility.
+			// One day this may get in the way, so we'll have to take it out
+			args = append(args, "EX", "0")
 			args = append(args, "NOACK")
 		}
 
