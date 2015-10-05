@@ -3,7 +3,6 @@ package okq
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"strconv"
 	. "testing"
 	"time"
@@ -49,9 +48,9 @@ func TestClient(t *T) {
 	require.Nil(err)
 	assert.Equal(e.Contents, "bar")
 
-	status, err := c.Status(q)
+	statuses, err := c.Status(q)
 	require.Nil(err)
-	assert.Equal(status[0], fmt.Sprintf("%s total: 3 processing: 0 consumers: 0", q))
+	assert.Equal(statuses[0], QueueStatus{q, 3, 0, 0})
 }
 
 func TestConsumer(t *T) {
@@ -87,7 +86,7 @@ func TestConsumer(t *T) {
 	require.Nil(<-retCh)
 	require.Nil(c1.Close())
 
-	status, err := c2.Status(q)
+	statuses, err := c2.Status(q)
 	require.Nil(err)
-	assert.Equal(fmt.Sprintf("%s total: 0 processing: 0 consumers: 0", q), status[0])
+	assert.Equal(QueueStatus{q, 0, 0, 0}, statuses[0])
 }

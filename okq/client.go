@@ -47,6 +47,7 @@ package okq
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -243,10 +244,54 @@ func (c *Client) Push(queue, contents string, f PushFlag) error {
 	return c.PushEvent(&event, f)
 }
 
+// QueueStatus describes the current status for a single queue, as described by
+// the QSTATUS command
+type QueueStatus struct {
+	Name       string // Name of the queue
+	Total      int64  // Total events in the queue, includes ones being processed
+	Processing int64  // Number of events currently being processed
+	Consumers  int64  // Number of connections registered as consumers for this queue
+}
+
 // Status returns the statuses of the given queues, or the statuses of all the
 // known queues if no queues are given
-func (c *Client) Status(queue ...string) ([]string, error) {
-	return c.cmd("QSTATUS", queue).List()
+func (c *Client) Status(queue ...string) ([]QueueStatus, error) {
+	arr, err := c.cmd("QSTATUS", queue).Array()
+	if err != nil {
+		return nil, err
+	}
+	statuses := make([]QueueStatus, len(arr))
+	for i := range arr {
+		status, err := arr[i].Array()
+		if err != nil {
+			return nil, err
+		} else if len(status) < 4 {
+			return nil, fmt.Errorf("not enough elements in status: %s", status)
+		}
+		name, err := status[0].Str()
+		if err != nil {
+			return nil, err
+		}
+		total, err := status[1].Int64()
+		if err != nil {
+			return nil, err
+		}
+		processing, err := status[2].Int64()
+		if err != nil {
+			return nil, err
+		}
+		consumers, err := status[3].Int64()
+		if err != nil {
+			return nil, err
+		}
+		statuses[i] = QueueStatus{
+			Name:       name,
+			Total:      total,
+			Processing: processing,
+			Consumers:  consumers,
+		}
+	}
+	return statuses, nil
 }
 
 // Close closes all connections that this client currently has open
