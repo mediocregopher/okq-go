@@ -51,9 +51,9 @@ import (
 	"strings"
 	"time"
 
-	"code.google.com/p/go-uuid/uuid"
 	"github.com/grooveshark/golib/agg"
 	"github.com/mediocregopher/radix.v2/redis"
+	"github.com/pborman/uuid"
 )
 
 var uuidCh = make(chan string, 1024)
